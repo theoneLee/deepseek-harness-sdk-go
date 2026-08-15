@@ -1,0 +1,91 @@
+name: Release
+
+# Go modules are published by pushing a semver tag. This workflow validates
+# the tag, runs the same checks as CI, and creates the corresponding GitHub
+# Release. It does not require a registry secret or add generated authorship
+# metadata to the repository.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Create a GitHub Release from the current v* tag
+        required: true
+        type: boolean
+        default: false
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release candidate
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.label.name == 'release-dry-run'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          cache: true
+
+      - name: Validate release tag
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          version="$(sed -n 's/^const SDKVersion = "\(.*\)"$/\1/p' runtime.go)"
+          [ -n "$version" ] || { echo "::error::runtime.go has no SDKVersion"; exit 1; }
+          [ "$REF_TYPE" = tag ] && [ "$REF_NAME" = "v$version" ] || {
+            echo "::error::Release must run from tag v$version."
+            exit 1
+          }
+
+      - name: Format
+        run: test -z "$(gofmt -l .)"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race ./...
+
+  publish:
+    name: Create GitHub Release
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Authorize publication request
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          [ "$REF_TYPE" = tag ] && [[ "$REF_NAME" == v* ]] || {
+            echo "::error::Publication must run from a v* tag."
+            exit 1
+          }
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "$GITHUB_REF_NAME"

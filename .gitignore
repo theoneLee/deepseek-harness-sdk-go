@@ -1,0 +1,13 @@
+# Go build and test output
+/bin/
+/dist/
+*.test
+*.out
+
+# Local runtime downloads
+.dsh-runtime-cache/
+
+# IDE and OS metadata
+.DS_Store
+.idea/
+.vscode/
