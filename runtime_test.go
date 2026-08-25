@@ -17,6 +17,15 @@ import (
 	"testing"
 )
 
+func TestSDKVersionMatchesUpstreamRelease(t *testing.T) {
+	if SDKVersion != "0.1.1-rc.2" {
+		t.Fatalf("SDKVersion = %q, want %q", SDKVersion, "0.1.1-rc.2")
+	}
+	if got := ToPyPIVersion(SDKVersion); got != "0.1.1rc2" {
+		t.Fatalf("ToPyPIVersion(SDKVersion) = %q, want %q", got, "0.1.1rc2")
+	}
+}
+
 func TestResolveRuntimeCachesVerifiedWheel(t *testing.T) {
 	wheelTag, executableTag, err := currentPlatform()
 	if err != nil {

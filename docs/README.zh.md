@@ -22,6 +22,7 @@ go get github.com/theoneLee/deepseek-harness-sdk-go
 SDK 目标是 DeepSeek Harness 项目发布的单文件运行时。如果没有显式指定可执行程序，
 第一次 `Start` 或 `Run` 会从 PyPI 风格索引解析对应平台的 wheel，校验 SHA-256，
 解压到缓存，并在后续启动中复用。
+当前默认目标是运行时 `0.1.1-rc.2`，对应上游 `dsh-v0.1.1-rc.2` tag。
 
 ## 快速开始
 
@@ -146,6 +147,7 @@ go test -race ./...
 
 GitHub Actions 会在 Linux 和 macOS 上执行格式检查、vet、race 测试和普通测试。发布从
 匹配的 `v*` tag 创建；计划中的对等工作见 [`ROADMAP.md`](ROADMAP.md)。
+后续跟进官方 tag 时，请按 [tag 更新 runbook](TAG_UPDATE_RUNBOOK.zh.md) 执行。
 
 ## 代码贡献指南
 

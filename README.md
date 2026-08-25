@@ -23,7 +23,8 @@ go get github.com/theoneLee/deepseek-harness-sdk-go
 The SDK targets the single-file runtime published by the DeepSeek Harness
 project. With no explicit executable, the first `Start` or `Run` resolves the
 matching platform wheel from a PyPI-style index, verifies SHA-256, extracts it
-into a cache, and reuses it on later starts.
+into a cache, and reuses it on later starts. The default target is runtime
+`0.1.1-rc.2`, corresponding to upstream tag `dsh-v0.1.1-rc.2`.
 
 ## Quick start
 
@@ -157,6 +158,7 @@ go test -race ./...
 GitHub Actions runs formatting, vet, race-enabled tests, and the regular test
 suite on Linux and macOS. Releases are created from matching `v*` tags; see
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for planned parity work.
+For the next upstream tag update, follow the [tag update runbook](docs/TAG_UPDATE_RUNBOOK.zh.md).
 
 ## Code Contribution Guide
 

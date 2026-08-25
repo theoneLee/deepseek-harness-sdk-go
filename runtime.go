@@ -15,9 +15,10 @@ import (
 	"strings"
 )
 
-// SDKVersion is the default runtime release targeted by this SDK. It is
-// converted to PEP 440 for index requests.
-const SDKVersion = "0.1.0-rc.6"
+// SDKVersion is the default runtime release targeted by this SDK. It tracks
+// the version portion of the upstream dsh-v0.1.1-rc.2 tag and is converted to
+// PEP 440 for index requests.
+const SDKVersion = "0.1.1-rc.2"
 
 const runtimeWheelMaxBytes int64 = 512 * 1024 * 1024
 
