@@ -2,6 +2,7 @@ package deepseekharness
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 )
 
@@ -49,11 +50,12 @@ type InitializeResponse = InitializeResult
 // InitializeParams configures the process-wide initialize handshake. A zero
 // MaxTokens omits maxTokens from the wire payload.
 type InitializeParams struct {
-	CWD             string
-	Provider        string
-	Model           string
-	ReasoningEffort string
-	MaxTokens       int
+	CWD              string
+	Provider         string
+	Model            string
+	ReasoningEffort  string
+	MaxTokens        int
+	ApprovalRequests bool
 }
 
 // NotificationFilter decides whether a notification is delivered to a
@@ -136,4 +138,50 @@ func cloneJSONValue(value any) (any, error) {
 		return nil, err
 	}
 	return decoded, nil
+}
+
+// ResumeSessionOptions overrides saved options before resumed execution.
+type ResumeSessionOptions struct {
+	PermissionMode *string
+}
+
+// ApprovalRequestParams is the payload of an opted-in approval/request.
+type ApprovalRequestParams struct {
+	SessionID string  `json:"sessionId"`
+	ToolName  string  `json:"toolName"`
+	CallID    *string `json:"callId,omitempty"`
+	Reason    *string `json:"reason,omitempty"`
+}
+
+// ApprovalRequestResult is a decision for one operation.
+type ApprovalRequestResult struct {
+	Outcome ApprovalOutcome `json:"outcome"`
+}
+
+type ApprovalOutcome string
+
+const (
+	ApprovalAllowedOnce ApprovalOutcome = "allowed-once"
+	ApprovalRejected    ApprovalOutcome = "rejected"
+	ApprovalCancelled   ApprovalOutcome = "cancelled"
+)
+
+// UserQuestionHandler runs outside the transport reader. Its context is
+// cancelled when the runtime withdraws the question or the transport closes.
+type UserQuestionHandler func(context.Context, UserQuestionRequest) (UserQuestionAnswer, error)
+
+type UserQuestionRequest struct {
+	RequestID string       `json:"requestId"`
+	SessionID string       `json:"sessionId"`
+	Questions []JSONObject `json:"questions"`
+}
+
+type UserQuestionAnswerItem struct {
+	ID       string   `json:"id"`
+	Selected []string `json:"selected"`
+	Custom   *string  `json:"custom,omitempty"`
+}
+
+type UserQuestionAnswer struct {
+	Answers []UserQuestionAnswerItem `json:"answers"`
 }

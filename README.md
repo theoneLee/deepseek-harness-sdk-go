@@ -26,10 +26,11 @@ The SDK targets the single-file runtime published by the DeepSeek Harness
 project. With no explicit executable, the first `Start` or `Run` resolves the
 matching platform wheel from a PyPI-style index, verifies SHA-256, extracts it
 into a cache, and reuses it on later starts. The default target is runtime
-`0.1.5-alpha.1`, corresponding to upstream tag `dsh-v0.1.5-alpha.1`.
-The matching public runtime wheel must be available before automatic download
-can start this version; use `DSHBin` or `RuntimeIndexURL` when consuming a
-private or pre-publication wheel.
+`0.2.2-rc.2`, distributed on [PyPI](https://pypi.org/project/deepseek-harness-runtime-bin/0.2.2rc2/).
+The protocol reference is Python SDK commit
+[`2e39e704`](https://github.com/deepseek-ai/deepseek-harness/tree/2e39e70496aa02986ca6a820c5d497e816b69d7e/python/sdk).
+Use a matching build via `DSHBin` for features newer than the public wheel,
+including the resume permission override and workspace-root relocation semantics.
 
 ## Quick start
 
@@ -132,8 +133,8 @@ interval, and `FinishReason` is the last `turn/end` reason kind when present.
 Those values describe the owned activity interval, not an output causally
 assigned to only the submitted prompt.
 
-The callback is invoked for each collected notification after the inbox
-receipt. `FinishReason` is a `*string`; it is nil when no turn ended.
+The callback receives each collected notification from the matching inbox
+receipt or command admission onward. `FinishReason` is a `*string`; it is nil when no turn ended.
 
 ## Low-level client
 
@@ -161,6 +162,28 @@ The client supports `Request`, `Notify`, `SessionPrompt`, `Subscribe`,
 `RespondError`. Server-to-client requests are queued until the caller answers
 them. Notifications that no subscription matched are available through
 `NextNotification`.
+
+## Session control and native commands
+
+- `ResumeSession` restores persisted history without sending input. Omit
+  `ResumeSessionOptions.PermissionMode` to keep the saved permission preset.
+- `Session.GetWorkingDirectory` and `Session.SetWorkingDirectory` read and
+  change the runtime's effective session directory.
+- `Run` routes input through `session/query`. Ordinary prompts complete at root
+  idle after their inbox receipt. Native commands such as `/compact` and
+  `/permission` wait for their matching command outcome. Command refusals return
+  `FinishReason == "error"` with the runtime diagnostic in `FinalResponse`.
+- Enable `ApprovalRequests` to receive `approval/request` over `NextRequest`.
+  Drain requests concurrently with `Run` and reply through `Respond` using
+  `ApprovalRequestResult`. For user questions, set `OnUserQuestion` and observe
+  the callback context for withdrawal or shutdown.
+
+## Local Office operations
+
+`ConvertOffice`, `RecalculateOffice`, and `RenderOfficeImages` run the
+upstream Office CLI through an installed sidecar. Prepare it with the Python
+runtime's `download_office()` and pass the returned directory as
+`OfficeOptions.SidecarDir` or `DSH_OFFICE_SIDECAR`.
 
 ## Errors
 

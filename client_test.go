@@ -1,6 +1,7 @@
 package deepseekharness
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,11 +41,11 @@ func TestFakeRuntimeProcess(t *testing.T) {
 		}
 		switch scenario {
 		case "crash":
-			if method == "initialize" {
-				writeFakeFrame(t, map[string]any{"jsonrpc": "2.0", "id": message["id"], "result": map[string]any{}})
+			if method == "anything" {
 				fmt.Fprintln(os.Stderr, "fake runtime stderr line one")
 				os.Exit(7)
 			}
+			handleFakeRequest(t, scenario, message)
 		case "request-then-exit":
 			if method == "initialize" {
 				writeFakeFrame(t, map[string]any{"jsonrpc": "2.0", "id": message["id"], "result": map[string]any{}})
@@ -61,6 +62,13 @@ func handleFakeRequest(t *testing.T, scenario string, message map[string]any) {
 	method, _ := message["method"].(string)
 	switch method {
 	case "initialize":
+		if scenario == "native-command" || scenario == "native-failure" {
+			params := message["params"].(map[string]any)
+			capabilities, ok := params["capabilities"].(map[string]any)
+			if params["approvalRequests"] != true || !ok || capabilities["userQuestions"] != true {
+				t.Fatalf("missing initialize capabilities: %#v", params)
+			}
+		}
 		if scenario == "initialize-slow" {
 			time.Sleep(5 * time.Second)
 			return
@@ -88,6 +96,35 @@ func handleFakeRequest(t *testing.T, scenario string, message map[string]any) {
 		}
 	case "anything":
 		writeFakeFrame(t, map[string]any{"jsonrpc": "2.0", "id": message["id"], "result": message["params"]})
+	case "session/resume", "session/working-directory/get", "session/working-directory/set":
+		params := message["params"].(map[string]any)
+		result := map[string]any{}
+		switch method {
+		case "session/resume":
+			if params["sessionId"] != "resumed" || params["permissionMode"] != "test-mode" {
+				t.Fatalf("unexpected resume params: %#v", params)
+			}
+		case "session/working-directory/get":
+			result["cwd"] = "/workspace/start"
+		case "session/working-directory/set":
+			result["cwd"] = params["path"]
+		}
+		writeFakeFrame(t, map[string]any{"jsonrpc": "2.0", "id": message["id"], "result": result})
+	case "session/query":
+		if scenario == "native-command" || scenario == "native-failure" {
+			handleFakeCommand(t, scenario, message)
+			return
+		}
+		if scenario == "native-prompt" {
+			handleFakeRequest(t, scenario, map[string]any{
+				"id": message["id"], "params": message["params"], "method": "session/prompt",
+			})
+			return
+		}
+		writeFakeFrame(t, map[string]any{
+			"jsonrpc": "2.0", "id": message["id"],
+			"error": map[string]any{"code": -32601, "message": "method not found"},
+		})
 	case "session/prompt":
 		if scenario == "slow" {
 			time.Sleep(5 * time.Second)
@@ -105,9 +142,13 @@ func handleFakeRequest(t *testing.T, scenario string, message map[string]any) {
 		}
 		params, _ := message["params"].(map[string]any)
 		sessionID, _ := params["sessionId"].(string)
+		receipt := map[string]any{"messageId": "message-1"}
+		if scenario == "native-prompt" {
+			receipt["kind"] = "prompt"
+		}
 		writeFakeFrame(t, map[string]any{
 			"jsonrpc": "2.0", "id": message["id"],
-			"result": map[string]any{"messageId": "message-1"},
+			"result": receipt,
 		})
 		writeFakeFrame(t, map[string]any{
 			"jsonrpc": "2.0", "method": "session.event",
@@ -254,7 +295,7 @@ func TestClientHandshakeAndPrompt(t *testing.T) {
 }
 
 func TestHighLevelRunAndSessionTree(t *testing.T) {
-	for _, scenario := range []string{"basic", "subagent"} {
+	for _, scenario := range []string{"basic", "subagent", "native-prompt"} {
 		harness := NewDeepSeekHarness(DeepSeekHarnessConfig{
 			LaunchArgsOverride:     fakeOptions(scenario).LaunchArgsOverride,
 			Env:                    fakeOptions(scenario).Env,
@@ -481,4 +522,112 @@ func asError(err error, target any) bool {
 		return false
 	}
 	return errors.As(err, target)
+}
+
+func handleFakeCommand(t *testing.T, scenario string, message map[string]any) {
+	params := message["params"].(map[string]any)
+	sessionID := params["sessionId"]
+	notify := func(method string, params map[string]any) {
+		params["sessionId"] = sessionID
+		writeFakeFrame(t, map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
+	}
+	event := func(kind string) {
+		notify("session.event", map[string]any{"event": map[string]any{
+			"type": kind, "data": map[string]any{"commandId": "command-1"},
+		}})
+	}
+	complete := func(id, text, reason string) {
+		notify("session.query.completed", map[string]any{
+			"commandId": id, "finalResponse": text, "finishReason": reason,
+		})
+	}
+	notify("session.status", map[string]any{"status": "idle"})
+	event("command/run")
+	notify("session.status", map[string]any{"status": "idle"})
+	complete("unrelated", "ignore me", "ok")
+	kind, reason := "success", "ok"
+	if scenario == "native-failure" {
+		kind, reason = "error", "error"
+		complete("command-1", "native outcome", reason)
+	}
+	event("command/done")
+	writeFakeFrame(t, map[string]any{
+		"jsonrpc": "2.0", "id": message["id"],
+		"result": map[string]any{"kind": "command", "execution": map[string]any{
+			"commandId": "command-1", "result": map[string]any{"kind": kind, "text": "handler settlement"},
+		}},
+	})
+	if scenario != "native-failure" {
+		complete("command-1", "native outcome", reason)
+	}
+}
+
+func TestNativeCommandActivityAndSessionControls(t *testing.T) {
+	for _, scenario := range []string{"native-command", "native-failure"} {
+		t.Run(scenario, func(t *testing.T) {
+			opts := fakeOptions(scenario)
+			h := NewDeepSeekHarness(DeepSeekHarnessConfig{
+				LaunchArgsOverride: opts.LaunchArgsOverride, Env: opts.Env,
+				RequestTimeoutSeconds: 2, ShutdownTimeoutSeconds: opts.ShutdownTimeoutSeconds,
+				ApprovalRequests: true,
+				OnUserQuestion: func(context.Context, UserQuestionRequest) (UserQuestionAnswer, error) {
+					return UserQuestionAnswer{}, errors.New("unexpected question")
+				},
+			})
+			t.Cleanup(func() { _ = h.Close() })
+			preset := "test-mode"
+			s, err := h.ResumeSession("resumed", ResumeSessionOptions{PermissionMode: &preset})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cwd, err := s.GetWorkingDirectory(); err != nil || cwd != "/workspace/start" {
+				t.Fatalf("get directory = %q, %v", cwd, err)
+			}
+			if cwd, err := s.SetWorkingDirectory("/workspace/next"); err != nil || cwd != "/workspace/next" {
+				t.Fatalf("set directory = %q, %v", cwd, err)
+			}
+			var observed int
+			result, err := s.Run("/compact", func(Notification) { observed++ })
+			if err != nil {
+				t.Fatal(err)
+			}
+			reason := "ok"
+			if scenario == "native-failure" {
+				reason = "error"
+			}
+			if result.SessionID != s.ID || result.FinalResponse != "native outcome" ||
+				result.FinishReason == nil || *result.FinishReason != reason ||
+				len(result.Events) != 2 || len(result.Notifications) != 3 || observed != 3 {
+				t.Fatalf("unexpected command result: %#v, observed %d", result, observed)
+			}
+		})
+	}
+}
+
+func TestUserQuestionCancellation(t *testing.T) {
+	state := newClientState(nil, nil)
+	client := NewHarnessClient()
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	state.questionHandler = func(ctx context.Context, question UserQuestionRequest) (UserQuestionAnswer, error) {
+		if question.RequestID != "question-1" || question.SessionID != "s1" || len(question.Questions) != 1 {
+			t.Errorf("unexpected question: %#v", question)
+		}
+		close(started)
+		<-ctx.Done()
+		close(cancelled)
+		return UserQuestionAnswer{}, ctx.Err()
+	}
+	client.handleFrame(state, []byte(`{"id":1,"method":"user-question/ask","params":{"requestId":"question-1","sessionId":"s1","questions":[{"id":"q","question":"Which?"}]}}`))
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("question handler did not start")
+	}
+	client.handleFrame(state, []byte(`{"method":"user-question.cancelled","params":{"requestId":"question-1"}}`))
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("question handler did not receive cancellation")
+	}
 }
