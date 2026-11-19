@@ -18,11 +18,11 @@ import (
 )
 
 func TestSDKVersionMatchesUpstreamRelease(t *testing.T) {
-	if SDKVersion != "0.1.5-alpha.1" {
-		t.Fatalf("SDKVersion = %q, want %q", SDKVersion, "0.1.5-alpha.1")
+	if SDKVersion != "0.2.2-rc.2" {
+		t.Fatalf("SDKVersion = %q, want %q", SDKVersion, "0.2.2-rc.2")
 	}
-	if got := ToPyPIVersion(SDKVersion); got != "0.1.5a1" {
-		t.Fatalf("ToPyPIVersion(SDKVersion) = %q, want %q", got, "0.1.5a1")
+	if got := ToPyPIVersion(SDKVersion); got != "0.2.2rc2" {
+		t.Fatalf("ToPyPIVersion(SDKVersion) = %q, want %q", got, "0.2.2rc2")
 	}
 }
 

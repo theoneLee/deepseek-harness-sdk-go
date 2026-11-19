@@ -3,6 +3,7 @@ package deepseekharness
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -36,6 +37,7 @@ type HarnessClientOptions struct {
 	InitializeTimeoutSeconds float64
 	RequestTimeoutSeconds    float64
 	ShutdownTimeoutSeconds   float64
+	OnUserQuestion           UserQuestionHandler
 
 	// Command and Args are a complete explicit command channel. DSHBin is the
 	// dsh CLI channel and receives the SDK profile and patch arguments.
@@ -80,9 +82,12 @@ type responseResult struct {
 type clientState struct {
 	mu sync.Mutex
 
-	pending map[string]chan responseResult
-	subs    map[uint64]*NotificationSubscription
-	parents map[string]string
+	pending         map[string]chan responseResult
+	subs            map[uint64]*NotificationSubscription
+	parents         map[string]string
+	questionHandler UserQuestionHandler
+	questions       map[string]context.CancelFunc
+	closing         bool
 
 	unmatched *itemQueue[Notification]
 	requests  *itemQueue[IncomingRequest]
@@ -229,6 +234,12 @@ func (c *HarnessClient) Close() error {
 		return nil
 	}
 
+	state.mu.Lock()
+	state.closing = true
+	for _, cancel := range state.questions {
+		cancel()
+	}
+	state.mu.Unlock()
 	if !state.isClosed() {
 		timeout := c.shutdownTimeout()
 		if _, err := c.requestOnState(state, "shutdown", nil, timeout, true); err != nil {
@@ -279,8 +290,17 @@ func (c *HarnessClient) Initialize(params InitializeParams) (InitializeResult, e
 	if err != nil {
 		return InitializeResult{}, err
 	}
+	if params.ApprovalRequests {
+		payload["approvalRequests"] = true
+	}
+	state.mu.Lock()
+	state.questionHandler = c.Options.OnUserQuestion
+	if state.questionHandler != nil {
+		payload["capabilities"] = JSONObject{"userQuestions": true}
+	}
+	state.mu.Unlock()
 	timeout, hasTimeout := c.initializeTimeout()
-	result, err := c.requestWithTimeout("initialize", payload, timeout, hasTimeout)
+	result, err := c.requestOnState(state, "initialize", payload, timeout, hasTimeout)
 	if err != nil {
 		return InitializeResult{}, c.finishInitialize(state, err)
 	}
@@ -539,8 +559,7 @@ func (c *HarnessClient) requestWithTimeout(method string, params any, timeout ti
 }
 
 func (c *HarnessClient) requestOnState(state *clientState, method string, params any, timeout time.Duration, hasTimeout bool) (any, error) {
-	// Close uses the same correlation path but must keep using its original
-	// state even while another goroutine is clearing the client pointer.
+	// Keep requests bound to the process state selected by the caller.
 	id := newRequestID()
 	waiter := make(chan responseResult, 1)
 	state.mu.Lock()
@@ -693,11 +712,14 @@ func (c *HarnessClient) handleFrame(state *clientState, frame []byte) {
 	method, hasMethod := message["method"].(string)
 	switch {
 	case hasID && hasMethod:
-		state.requests.put(IncomingRequest{
+		request := IncomingRequest{
 			ID:      normalizeID(id),
 			Method:  method,
 			Payload: objectParams(message["params"]),
-		})
+		}
+		if method != "user-question/ask" || !c.handleUserQuestion(state, request) {
+			state.requests.put(request)
+		}
 	case hasID:
 		pending := state.takePending(idKey(id))
 		if pending == nil {
@@ -724,6 +746,12 @@ func (c *HarnessClient) handleFrame(state *clientState, frame []byte) {
 		notification := Notification{Method: method, Payload: objectParams(message["params"])}
 		state.recordLineage(notification)
 		state.mu.Lock()
+		if method == "user-question.cancelled" {
+			requestID, _ := notification.Payload["requestId"].(string)
+			if cancel := state.questions[requestID]; cancel != nil {
+				cancel()
+			}
+		}
 		subscribers := make([]*NotificationSubscription, 0, len(state.subs))
 		for _, subscription := range state.subs {
 			subscribers = append(subscribers, subscription)
@@ -825,6 +853,9 @@ func (s *clientState) failClosed(err error) {
 	}
 	s.closed = true
 	s.closedErr = err
+	for _, cancel := range s.questions {
+		cancel()
+	}
 	pending := make([]chan responseResult, 0, len(s.pending))
 	for id, waiter := range s.pending {
 		pending = append(pending, waiter)

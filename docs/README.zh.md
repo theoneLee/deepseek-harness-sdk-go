@@ -23,9 +23,10 @@ go get github.com/theoneLee/deepseek-harness-sdk-go
 SDK 目标是 DeepSeek Harness 项目发布的单文件运行时。如果没有显式指定可执行程序，
 第一次 `Start` 或 `Run` 会从 PyPI 风格索引解析对应平台的 wheel，校验 SHA-256，
 解压到缓存，并在后续启动中复用。
-当前默认目标是运行时 `0.1.5-alpha.1`，对应上游 `dsh-v0.1.5-alpha.1` tag。
-自动启动依赖对应版本的 runtime wheel 已发布到索引；在官方 wheel 尚未公开时，
-请使用 `DSHBin`，或通过 `RuntimeIndexURL` 指向包含该版本 wheel 的内部索引。
+默认运行时为 [PyPI 上的 `0.2.2-rc.2`](https://pypi.org/project/deepseek-harness-runtime-bin/0.2.2rc2/)。
+协议参考为上游 Python SDK 提交
+[`2e39e704`](https://github.com/deepseek-ai/deepseek-harness/tree/2e39e70496aa02986ca6a820c5d497e816b69d7e/python/sdk)。
+恢复会话时覆盖权限预设、工作区根目录迁移等后续协议行为，请用 `DSHBin` 指向对应构建。
 
 ## 快速开始
 
@@ -120,7 +121,7 @@ result, err := session.Run(
 助手文本；`FinishReason` 是该区间最后一个 `turn/end` 的 reason kind（如果存在）。
 这些字段描述的是 `Run` 所拥有的活动区间，不代表某项输出只在因果上归属于刚提交的提示词。
 
-回调会在 inbox receipt 之后对每一条收集到的通知调用。没有轮次结束时，`FinishReason`
+回调从对应的入箱回执或命令开始事件起接收通知。没有轮次结束时，`FinishReason`
 为 nil。
 
 ## 低层客户端
@@ -148,6 +149,24 @@ _, err := client.Initialize(deepseekharness.InitializeParams{
 `SubscribeSessionTree`、`NextNotification`、`NextRequest`、`Respond` 与
 `RespondError`。server-to-client 请求会排队等待调用方应答；没有任何订阅匹配的通知
 可通过 `NextNotification` 获取。
+
+## 会话控制与原生命令
+
+- `ResumeSession` 恢复已持久化的会话。省略 `ResumeSessionOptions.PermissionMode`
+  时沿用已保存的权限预设。
+- `Session.GetWorkingDirectory` 和 `Session.SetWorkingDirectory` 读取和修改会话的有效工作目录。
+- `Run` 通过 `session/query` 路由输入。普通提示词从入箱回执收集到根会话变为空闲；
+  `/compact`、`/permission` 等原生命令等待同一个命令 ID 的执行结果。
+  运行时拒绝命令时，`FinishReason` 为 `error`，`FinalResponse` 包含拒绝原因。
+- 启用 `ApprovalRequests` 后，与 `Run` 并发调用 `NextRequest` 获取
+  `approval/request`，再用 `Respond` 返回 `ApprovalRequestResult`。
+  配置 `OnUserQuestion` 可处理用户问答，问题撤回或关闭运行时时会取消回调的 context。
+
+## 本地 Office 操作
+
+`ConvertOffice`、`RecalculateOffice` 和 `RenderOfficeImages` 调用已安装的上游 Office CLI。
+可通过 Python runtime 的 `download_office()` 安装，再将返回的路径传给
+`OfficeOptions.SidecarDir` 或设置 `DSH_OFFICE_SIDECAR`。
 
 ## 错误
 

@@ -16,9 +16,9 @@ import (
 )
 
 // SDKVersion is the default runtime release targeted by this SDK. It tracks
-// the version portion of the upstream dsh-v0.1.5-alpha.1 tag and is converted
+// the version portion of the upstream dsh-v0.2.2-rc.2 tag and is converted
 // to PEP 440 for index requests.
-const SDKVersion = "0.1.5-alpha.1"
+const SDKVersion = "0.2.2-rc.2"
 
 const runtimeWheelMaxBytes int64 = 512 * 1024 * 1024
 
@@ -270,6 +270,23 @@ func extractRuntime(cacheDir, executableName string, data []byte) error {
 		if err := write(root+filename, filepath.Join(staging, filename), true); err != nil {
 			cleanup()
 			return err
+		}
+	}
+	// New wheels ship a platform-specific manifest for optional resources.
+	// Preserve its location relative to the executable for runtime discovery.
+	target := strings.TrimSuffix(strings.TrimPrefix(executableName, "deepseek-harness-sdk-runtime-"), ".exe")
+	manifest := target + "/downloads.json"
+	for _, entry := range archive.File {
+		if entry.Name == root+manifest {
+			if err := os.Mkdir(filepath.Join(staging, target), 0o755); err != nil {
+				cleanup()
+				return &IOError{Err: err}
+			}
+			if err := write(root+manifest, filepath.Join(staging, filepath.FromSlash(manifest)), false); err != nil {
+				cleanup()
+				return err
+			}
+			break
 		}
 	}
 	marker, err := os.OpenFile(filepath.Join(staging, ".complete"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)

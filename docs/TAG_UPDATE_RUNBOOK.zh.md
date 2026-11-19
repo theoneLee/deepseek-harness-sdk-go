@@ -161,3 +161,15 @@ git status --short
   Windows x64；不再提供默认 `cordis.yml`。
 - Go 侧：同步上述公共行为，默认 runtime 更新为 `0.1.5-alpha.1`，保留旧字段作为
   deprecated 兼容入口，并新增 profile/patch/home/独立初始化超时及对应机制测试。
+
+
+## 0.2.2 同步记录
+
+- Python SDK 协议参考为 `master` 的 `2e39e70496aa02986ca6a820c5d497e816b69d7e`。
+- 最新上游 tag 为 `dsh-v0.2.2-rc.5`。核对时 PyPI 已发布的最新 wheel 为
+  `0.2.2rc2`，Go 默认使用 `0.2.2-rc.2`。依赖更新协议的调用方可指定对应的
+  `DSHBin`，或通过 `RuntimeVersion` 与 `RuntimeIndexURL` 使用相应 wheel。
+- Go 同步了会话恢复、权限覆盖参数、工作目录、原生命令运行边界、审批与用户问答。
+  `session/query` 返回 method not found 时，可使用旧运行时的 `session/prompt`。
+- 发布 wheel 新增平台资源下载清单，解压时保留在运行时预期的位置。Office API 复用
+  已安装的 sidecar，资源安装交给上游 runtime 的 `download_office()`。

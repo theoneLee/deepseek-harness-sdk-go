@@ -28,6 +28,8 @@ type DeepSeekHarnessConfig struct {
 	ShutdownTimeoutSeconds   float64
 	BaseURL                  string
 	APIKey                   string
+	ApprovalRequests         bool
+	OnUserQuestion           UserQuestionHandler
 
 	// The following fields are retained as compatibility aliases for versions
 	// before the dsh CLI runtime. New code should use DSHBin, DSHHome, Profile,
@@ -110,6 +112,7 @@ func NewDeepSeekHarness(config ...DeepSeekHarnessConfig) *DeepSeekHarness {
 
 	client := NewHarnessClient(HarnessClientOptions{
 		DSHBin:                   resolved.DSHBin,
+		OnUserQuestion:           resolved.OnUserQuestion,
 		Profile:                  resolved.Profile,
 		Patches:                  resolved.Patches,
 		DSHHome:                  resolved.DSHHome,
@@ -145,11 +148,12 @@ func (h *DeepSeekHarness) Start() error {
 		return err
 	}
 	_, err := h.inner.client.Initialize(InitializeParams{
-		CWD:             h.inner.cwd,
-		Provider:        h.inner.config.Provider,
-		Model:           h.inner.config.Model,
-		ReasoningEffort: h.inner.config.ReasoningEffort,
-		MaxTokens:       h.inner.config.MaxTokens,
+		CWD:              h.inner.cwd,
+		Provider:         h.inner.config.Provider,
+		Model:            h.inner.config.Model,
+		ReasoningEffort:  h.inner.config.ReasoningEffort,
+		MaxTokens:        h.inner.config.MaxTokens,
+		ApprovalRequests: h.inner.config.ApprovalRequests,
 	})
 	if err != nil {
 		_ = h.inner.client.Close()
@@ -183,6 +187,17 @@ func (h *DeepSeekHarness) StartSession(sessionIDs ...string) (*Session, error) {
 	}
 	if sessionID == "" {
 		sessionID = "session-" + newRequestID()
+	}
+	return &Session{Harness: h, ID: sessionID}, nil
+}
+
+// ResumeSession restores persisted history without submitting input.
+func (h *DeepSeekHarness) ResumeSession(sessionID string, options ...ResumeSessionOptions) (*Session, error) {
+	if err := h.Start(); err != nil {
+		return nil, err
+	}
+	if err := h.Client().ResumeSession(sessionID, options...); err != nil {
+		return nil, err
 	}
 	return &Session{Harness: h, ID: sessionID}, nil
 }
@@ -248,58 +263,98 @@ func (s *Session) run(input any, callback func(Notification)) (*RunResult, error
 	if err != nil {
 		return nil, err
 	}
-	subscription, err := s.Harness.inner.client.SubscribeSessionTree(s.ID)
+	if err := s.Harness.Start(); err != nil {
+		return nil, err
+	}
+	client := s.Harness.Client()
+	subscription, err := client.SubscribeSessionTree(s.ID)
 	if err != nil {
 		return nil, err
 	}
 	defer subscription.Close()
-	messageID, err := s.Harness.inner.client.SessionPrompt(s.ID, blocks)
+	messageID, commandID, err := client.query(s.ID, blocks)
 	if err != nil {
 		return nil, err
 	}
 
-	notifications := make([]Notification, 0)
-	events := make([]JSONObject, 0)
-	received := false
+	result := &RunResult{
+		SessionID: s.ID, SessionRoot: s.Harness.inner.config.SessionRoot,
+		Events: []JSONObject{}, Notifications: []Notification{},
+	}
+	received, commandDone := false, false
+	record := func(notification Notification) bool {
+		if notification.Method == "session.query.completed" {
+			return false
+		}
+		event, _ := normalizeJSONObject(notification.Payload["event"])
+		rootEvent := notification.Method == "session.event" && notification.Payload["sessionId"] == s.ID
+		data, _ := normalizeJSONObject(event["data"])
+		matchingCommand := rootEvent && data["commandId"] == commandID
+		if !received {
+			if commandID == "" {
+				received = isInboxReceipt(notification, s.ID, messageID)
+			} else {
+				received = matchingCommand && event["type"] == "command/run"
+			}
+			if !received {
+				return false
+			}
+		}
+		if commandID != "" && matchingCommand && event["type"] == "command/done" {
+			commandDone = true
+		}
+		if rootEvent && event != nil {
+			result.Events = append(result.Events, event)
+		}
+		result.Notifications = append(result.Notifications, notification)
+		if callback != nil {
+			callback(notification)
+		}
+		return true
+	}
 	for {
 		notification, err := subscription.Next()
 		if err != nil {
 			return nil, err
 		}
-		if !received {
-			if !isInboxReceipt(notification, s.ID, messageID) {
+		payload := notification.Payload
+		if commandID != "" && notification.Method == "session.query.completed" && payload["sessionId"] == s.ID {
+			id, ok := payload["commandId"].(string)
+			if !ok || id == "" {
+				return nil, protocolError("Invalid session.query.completed command identity")
+			}
+			if id != commandID {
 				continue
 			}
-			received = true
-		}
-		if callback != nil {
-			callback(notification)
-		}
-		if notification.Method == "session.event" && notification.Payload["sessionId"] == s.ID {
-			if event, ok := normalizeJSONObject(notification.Payload["event"]); ok {
-				events = append(events, event)
+			text, textOK := payload["finalResponse"].(string)
+			reason, reasonOK := payload["finishReason"].(string)
+			if !textOK || !reasonOK || reason == "" {
+				return nil, protocolError("Invalid session.query.completed result")
 			}
+			for !commandDone {
+				queued, ok, err := subscription.TryNext()
+				if err != nil {
+					return nil, err
+				}
+				if !ok {
+					return nil, protocolError("Command completion is missing matching lifecycle events")
+				}
+				record(queued)
+			}
+			result.FinalResponse, result.FinishReason = text, &reason
+			return result, nil
 		}
-		notifications = append(notifications, notification)
-		if notification.Method == "session.status" &&
-			notification.Payload["sessionId"] == s.ID &&
-			notification.Payload["status"] == "idle" {
+		if record(notification) && commandID == "" && notification.Method == "session.status" &&
+			payload["sessionId"] == s.ID && payload["status"] == "idle" {
 			break
 		}
 	}
-
-	finishReason, err := FinishReason(events)
+	result.FinalResponse = FinalResponse(result.Events)
+	result.FinishReason, err = FinishReason(result.Events)
 	if err != nil {
 		return nil, err
 	}
-	return &RunResult{
-		SessionID:     s.ID,
-		FinalResponse: FinalResponse(events),
-		FinishReason:  finishReason,
-		Events:        events,
-		Notifications: notifications,
-		SessionRoot:   s.Harness.inner.config.SessionRoot,
-	}, nil
+	return result, nil
 }
 
 func mergeHarnessConfig(defaults, supplied DeepSeekHarnessConfig) DeepSeekHarnessConfig {
@@ -383,5 +438,7 @@ func mergeHarnessConfig(defaults, supplied DeepSeekHarnessConfig) DeepSeekHarnes
 	if supplied.RuntimeCacheDir != "" {
 		defaults.RuntimeCacheDir = supplied.RuntimeCacheDir
 	}
+	defaults.ApprovalRequests = supplied.ApprovalRequests
+	defaults.OnUserQuestion = supplied.OnUserQuestion
 	return defaults
 }
